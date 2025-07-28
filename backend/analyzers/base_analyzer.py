@@ -52,12 +52,28 @@ class BaseAnalyzer(ABC):
         X = combined_df.drop(columns=['label'])
         y = combined_df['label']
         
+        # Validate data quality
+        if X.isnull().any().any():
+            print("[process_data] Warning: NaN values found, filling with 0")
+            X = X.fillna(0)
+        
+        if np.isinf(X.values).any():
+            print("[process_data] Warning: Infinite values found, clipping")
+            X = X.replace([np.inf, -np.inf], 0)
+        
         # Rename columns to bit positions
         self.feature_names = [f'bit_{i}' for i in range(X.shape[1])]
         X.columns = self.feature_names
         
         self.X = X.copy()
         self.y = y.copy()
+        
+        # Validate we have at least 2 classes
+        unique_labels = y.unique()
+        if len(unique_labels) < 2:
+            raise ValueError(f"Need at least 2 classes for classification. Found: {unique_labels}")
+        
+        print(f"[process_data] Labels distribution - Cipher (1): {(y==1).sum()}, Random (0): {(y==0).sum()}")
         
         # Split the data into train and test
         X_train, X_test, y_train, y_test = train_test_split(
@@ -79,13 +95,137 @@ class BaseAnalyzer(ABC):
         """Return the model name for display purposes"""
         pass
     
+    def validate_model_training(self, model):
+        """Validate that the model was trained successfully"""
+        print(f"[validate_model_training] Validating {self.get_model_name()} training...")
+        
+        # Check if model has the required attributes
+        if not hasattr(model, 'fit'):
+            raise ValueError("Model does not have fit method")
+        
+        # For tree-based models, check estimators
+        if hasattr(model, 'estimators_'):
+            if model.estimators_ is None:
+                raise RuntimeError("Model estimators_ is None - training failed")
+            if len(model.estimators_) == 0:
+                raise RuntimeError("Model has no estimators - training failed")
+            
+            # For Gradient Boosting, check if any estimator stage is None
+            if hasattr(model, 'n_estimators'):
+                none_count = 0
+                for stage in model.estimators_:
+                    if isinstance(stage, (list, np.ndarray)):
+                        none_count += sum(1 for est in stage if est is None)
+                    elif stage is None:
+                        none_count += 1
+                
+                if none_count > 0:
+                    raise RuntimeError(f"Model has {none_count} None estimators - partial training failure")
+        
+        # For models with feature_importances_, validate they exist
+        if hasattr(model, 'feature_importances_'):
+            if model.feature_importances_ is None:
+                raise RuntimeError("Model feature_importances_ is None")
+            if len(model.feature_importances_) == 0:
+                raise RuntimeError("Model feature_importances_ is empty")
+        
+        print(f"[validate_model_training] {self.get_model_name()} validation passed.")
+        return True
+    
     def train_model(self, X_train, y_train):
-        """Train the model"""
+        """Train the model with validation"""
         print(f"[train_model] Training {self.get_model_name()}.")
+        print(f"[train_model] Training data shape: {X_train.shape}")
+        print(f"[train_model] Training labels shape: {y_train.shape}")
+        print(f"[train_model] Unique labels: {np.unique(y_train)}")
+        
+        # Validate minimum data requirements
+        if len(X_train) < 10:
+            raise ValueError(f"Insufficient training data: {len(X_train)} samples. Need at least 10.")
+        
+        # Additional data preprocessing for problematic models
+        X_train_processed = X_train.copy()
+        y_train_processed = y_train.copy()
+        
+        # Handle any remaining data quality issues
+        if X_train_processed.isnull().any().any():
+            print("[train_model] Filling remaining NaN values in training data")
+            X_train_processed = X_train_processed.fillna(0)
+        
+        if np.isinf(X_train_processed.values).any():
+            print("[train_model] Clipping infinite values in training data")
+            X_train_processed = X_train_processed.replace([np.inf, -np.inf], 0)
+        
+        # Create and train model
         self.model = self.create_model()
-        self.model.fit(X_train, y_train)
-        print(f"[train_model] {self.get_model_name()} trained.")
-        return self.model
+        
+        try:
+            print(f"[train_model] Starting training...")
+            self.model.fit(X_train_processed, y_train_processed)
+            
+            # Validate training was successful
+            self.validate_model_training(self.model)
+            
+            # Test prediction on a small sample
+            test_sample = X_train_processed.iloc[:min(5, len(X_train_processed))]
+            try:
+                test_pred = self.model.predict(test_sample)
+                print(f"[train_model] Training validation successful - sample predictions: {test_pred}")
+            except Exception as pred_error:
+                raise RuntimeError(f"Model prediction test failed after training: {pred_error}")
+            
+            print(f"[train_model] {self.get_model_name()} trained successfully.")
+            return self.model
+            
+        except Exception as e:
+            print(f"[train_model] Training failed: {e}")
+            raise RuntimeError(f"Model training failed for {self.get_model_name()}: {e}")
+    
+    def safe_predict(self, X):
+        """Make predictions with error handling"""
+        if self.model is None:
+            raise RuntimeError("Model is not trained")
+        
+        # Validate model before prediction
+        self.validate_model_training(self.model)
+        
+        # Preprocess prediction data
+        X_processed = X.copy()
+        if X_processed.isnull().any().any():
+            print("[safe_predict] Filling NaN values in prediction data")
+            X_processed = X_processed.fillna(0)
+        
+        if np.isinf(X_processed.values).any():
+            print("[safe_predict] Clipping infinite values in prediction data")
+            X_processed = X_processed.replace([np.inf, -np.inf], 0)
+        
+        try:
+            return self.model.predict(X_processed)
+        except Exception as e:
+            raise RuntimeError(f"Prediction failed: {e}")
+    
+    def safe_predict_proba(self, X):
+        """Make probability predictions with error handling"""
+        if self.model is None:
+            raise RuntimeError("Model is not trained")
+        
+        # Validate model before prediction
+        self.validate_model_training(self.model)
+        
+        # Preprocess prediction data  
+        X_processed = X.copy()
+        if X_processed.isnull().any().any():
+            print("[safe_predict_proba] Filling NaN values in prediction data")
+            X_processed = X_processed.fillna(0)
+        
+        if np.isinf(X_processed.values).any():
+            print("[safe_predict_proba] Clipping infinite values in prediction data")
+            X_processed = X_processed.replace([np.inf, -np.inf], 0)
+        
+        try:
+            return self.model.predict_proba(X_processed)
+        except Exception as e:
+            raise RuntimeError(f"Probability prediction failed: {e}")
     
     def generate_shap_values(self):
         """Generate SHAP values using TreeExplainer"""
@@ -350,10 +490,12 @@ class BaseAnalyzer(ABC):
             # Train model
             model = self.train_model(X_train, y_train)
             
-            # Make predictions
-            y_pred = model.predict(X_test)
-            y_pred_proba = model.predict_proba(X_test)
+            # Make predictions using safe methods
+            print(f"[{self.get_model_name()}] Making predictions...")
+            y_pred = self.safe_predict(X_test)
+            y_pred_proba = self.safe_predict_proba(X_test)
             accuracy = accuracy_score(y_test, y_pred)
+            print(f"[{self.get_model_name()}] Predictions complete. Accuracy: {accuracy:.4f}")
             
             # Generate SHAP values
             shap_values_pos = self.generate_shap_values()
@@ -415,4 +557,6 @@ class BaseAnalyzer(ABC):
             
         except Exception as e:
             print(f"[{self.get_model_name()}] Error in analysis: {e}")
+            import traceback
+            traceback.print_exc()
             raise e

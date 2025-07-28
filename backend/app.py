@@ -11,7 +11,7 @@ from analyzers.gradient_boosting_analyzer import GradientBoostingAnalyzer
 app = Flask(__name__)
 CORS(app)
 
-# Initialize analyzers
+# Initialize analyzersa
 analyzers = {
     'random_forest': RandomForestAnalyzer(),
     'xgboost': XGBoostAnalyzer(),
